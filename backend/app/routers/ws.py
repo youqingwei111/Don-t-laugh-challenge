@@ -217,6 +217,20 @@ async def process_violation(room_id: str, room, reported_player_id: str, reporte
             "violation_count": current_violations
         })
 
+    # ---- 为犯规玩家重新分配禁忌词（不论是否被淘汰）----
+    new_word = game.replace_taboo_word(reported_player_id)
+    print(f"[VIOLATION] Replaced taboo word for {reported_player_id}, new word assigned")
+
+    # ---- 广播更新后的禁忌词给房间内所有玩家（带过滤）----
+    for conn in manager.get_room_connections(room_id):
+        pid = conn["player_id"]
+        await manager.send_personal(conn["websocket"], {
+            "type": "taboo_words",
+            "words": game.get_filtered_taboo_words(pid),
+            "my_word": game.state.taboo_words.get(pid, "未分配")
+        })
+    print(f"[VIOLATION] Updated taboo_words broadcasted to all players in room {room_id}")
+
 
 async def reset_game(room_id: str, room):
     print(f"[RESET] Resetting game for room {room_id}")

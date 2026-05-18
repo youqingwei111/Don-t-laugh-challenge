@@ -146,6 +146,31 @@ class GameEngine:
                     filtered[player.nickname] = word
         return filtered
 
+    def replace_taboo_word(self, player_id: str) -> str:
+        """
+        为指定玩家重新抽取一个禁忌词（不与当前房间内其他玩家重复）
+        返回新词
+        """
+        # 收集当前所有已使用的词
+        used_words = set(self.state.taboo_words.values())
+
+        # 收集所有可用词
+        all_words = []
+        for group in TABOO_WORDS.values():
+            all_words.extend(group)
+
+        # 过滤出未使用的词
+        available_words = [w for w in all_words if w not in used_words]
+
+        # 如果可用词不够（几乎不可能发生），就从所有词里抽
+        if not available_words:
+            available_words = all_words
+
+        new_word = random.choice(available_words)
+        self.state.taboo_words[player_id] = new_word
+        print(f"[REPLACE_WORD] player={player_id} new_word={new_word}")
+        return new_word
+
     def generate_task(self) -> GameTask:
         """生成一个新的随机任务"""
         available_indices = [
