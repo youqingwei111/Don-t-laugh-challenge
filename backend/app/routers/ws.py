@@ -14,7 +14,7 @@ TASK_INTERVAL_MIN = 30
 TASK_INTERVAL_MAX = 60
 
 # 触发禁忌词惩罚配置
-MAX_VIOLATIONS = 3  # 超过3次惩罚则淘汰
+MAX_VIOLATIONS = 3
 
 
 @router.websocket("/ws/{room_id}")
@@ -24,13 +24,19 @@ async def websocket_endpoint(
     player_id: str = Query(...),
     nickname: str = Query(...)
 ):
+    print(f"[WS] New connection: room_id={room_id}, player_id={player_id}, nickname={nickname}")
+
     if room_id not in rooms_db:
+        print(f"[WS] Room not found: {room_id}")
         await websocket.close(code=4004)
         return
 
     room = rooms_db[room_id]
+    print(f"[WS] Room found. host_id={room.host_id}, players={[p.id for p in room.players]}")
+
     player = room.get_player(player_id)
     if not player:
+        print(f"[WS] Player not found in room: player_id={player_id}")
         await websocket.close(code=4001)
         return
 
@@ -51,8 +57,10 @@ async def websocket_endpoint(
     try:
         while True:
             data = await websocket.receive_json()
+            print(f"[WS RECEIVE] room={room_id}, player={player_id}, data={data}")
             await handle_message(websocket, room_id, player_id, data)
     except WebSocketDisconnect:
+        print(f"[WS] Player disconnected: player_id={player_id}")
         manager.disconnect(websocket, room_id)
         room = rooms_db.get(room_id)
         if room:
@@ -65,19 +73,33 @@ async def websocket_endpoint(
                 "nickname": nickname,
                 "players": [p.model_dump() for p in room.players]
             })
+    except Exception as e:
+        print(f"[WS] Unexpected error: {e}")
 
 
 async def handle_message(websocket: WebSocket, room_id: str, player_id: str, data: dict):
+    print(f"[HANDLE] player_id={player_id}, data={data}")
+
     room = rooms_db.get(room_id)
     if not room:
+        print("[HANDLE] Room not found")
         return
 
     msg_type = data.get("type")
+    print(f"[HANDLE] msg_type='{msg_type}'")
 
+    # -------------------- 心跳 --------------------
+    if msg_type == "ping":
+        print(f"[HANDLE] Pong sent to {player_id}")
+        await manager.send_personal(websocket, {"type": "pong"})
+        return
+
+    # -------------------- 准备 --------------------
     if msg_type == "ready":
         player = room.get_player(player_id)
         if player:
             player.is_ready = data.get("ready", True)
+            print(f"[HANDLE] Player {player_id} ready={player.is_ready}")
             await manager.broadcast(room_id, {
                 "type": "player_ready",
                 "player_id": player_id,
@@ -86,9 +108,17 @@ async def handle_message(websocket: WebSocket, room_id: str, player_id: str, dat
             })
             await check_all_ready(room_id, room)
 
+    # -------------------- 开始游戏 --------------------
     elif msg_type == "start_game":
+        print(f"[HANDLE] start_game request from player_id={player_id}")
+        print(f"[HANDLE] room.host_id={room.host_id}, comparing with player_id={player_id}")
+        print(f"[HANDLE] Match: {room.host_id == player_id}")
+
         if room.host_id == player_id:
+            print(f"[HANDLE] Host authorized, calling start_game()")
             await start_game(room_id, room)
+        else:
+            print(f"[HANDLE] Rejected: only host can start game")
 
     elif msg_type == "chat":
         await manager.broadcast(room_id, {
@@ -138,32 +168,23 @@ async def handle_message(websocket: WebSocket, room_id: str, player_id: str, dat
             })
 
     elif msg_type == "report_violation":
-        # 玩家举报某人说了禁忌词
         reported_player_id = data.get("reported_player_id")
         await process_violation(room_id, room, reported_player_id, player_id)
 
     elif msg_type == "request_rematch":
-        # 房主请求再来一局
         if room.host_id == player_id:
             await reset_game(room_id, room)
 
     elif msg_type == "leave_game":
-        # 玩家主动离开游戏
         await handle_leave_game(room_id, room, player_id)
+
+    else:
+        print(f"[HANDLE] Unknown msg_type: '{msg_type}' - ignored")
 
 
 async def process_violation(room_id: str, room, reported_player_id: str, reporter_id: str):
-    """
-    处理触发禁忌词事件
-    1. 更新被举报玩家的惩罚计数
-    2. 广播惩罚状态给所有人
-    3. 如果达到最大惩罚次数，标记玩家淘汰
-    """
+    print(f"[VIOLATION] reported={reported_player_id}, reporter={reporter_id}")
     game = get_or_create_game(room_id, room.players)
-
-    # 初始化惩罚计数
-    if not hasattr(game.state, 'violations'):
-        game.state.violations = {}
 
     if reported_player_id not in game.state.violations:
         game.state.violations[reported_player_id] = 0
@@ -171,14 +192,11 @@ async def process_violation(room_id: str, room, reported_player_id: str, reporte
     game.state.violations[reported_player_id] += 1
     current_violations = game.state.violations[reported_player_id]
 
-    # 获取被惩罚玩家信息
     reported_player = room.get_player(reported_player_id)
     reporter_player = room.get_player(reporter_id)
 
     is_eliminated = current_violations >= MAX_VIOLATIONS
-    is_punished = current_violations > 0
 
-    # 广播惩罚状态
     await manager.broadcast(room_id, {
         "type": "violation_punished",
         "reported_player_id": reported_player_id,
@@ -191,7 +209,6 @@ async def process_violation(room_id: str, room, reported_player_id: str, reporte
         "message": f"{reported_player.nickname} 说了禁忌词！({'已淘汰' if is_eliminated else f'还剩{MAX_VIOLATIONS - current_violations}次机会'})" if reported_player else ""
     })
 
-    # 如果玩家被淘汰，广播淘汰状态
     if is_eliminated:
         await manager.broadcast(room_id, {
             "type": "player_eliminated",
@@ -202,19 +219,12 @@ async def process_violation(room_id: str, room, reported_player_id: str, reporte
 
 
 async def reset_game(room_id: str, room):
-    """
-    重置游戏 - 再来一局
-    1. 重置所有玩家的准备状态
-    2. 重置游戏引擎状态
-    3. 广播重置消息
-    """
+    print(f"[RESET] Resetting game for room {room_id}")
     game = get_or_create_game(room_id, room.players)
 
-    # 重置玩家状态
     for player in room.players:
         player.is_ready = False
 
-    # 重置游戏引擎
     game.state.is_active = False
     game.state.taboo_words = {}
     game.state.violations = {}
@@ -223,7 +233,6 @@ async def reset_game(room_id: str, room):
 
     room.status = "waiting"
 
-    # 广播重置消息
     await manager.broadcast(room_id, {
         "type": "game_reset",
         "room": room.model_dump(),
@@ -232,12 +241,10 @@ async def reset_game(room_id: str, room):
 
 
 async def handle_leave_game(room_id: str, room, player_id: str):
-    """处理玩家离开游戏"""
     game = get_or_create_game(room_id, room.players)
 
-    # 如果是游戏中的玩家，标记其状态
-    if player_id in getattr(game.state, 'violations', {}):
-        game.state.violations[player_id] = MAX_VIOLATIONS  # 标记为淘汰
+    if player_id in game.state.violations:
+        game.state.violations[player_id] = MAX_VIOLATIONS
 
     player = room.get_player(player_id)
     if player:
@@ -252,6 +259,7 @@ async def handle_leave_game(room_id: str, room, player_id: str):
 
 
 async def check_all_ready(room_id: str, room):
+    print(f"[CHECK_READY] players in room: {len(room.players)}")
     if len(room.players) < 1:
         await manager.broadcast(room_id, {
             "type": "waiting_players",
@@ -260,6 +268,7 @@ async def check_all_ready(room_id: str, room):
         return
 
     all_ready = all(p.is_ready for p in room.players)
+    print(f"[CHECK_READY] all_ready={all_ready}, player states={[p.is_ready for p in room.players]}")
     if all_ready:
         await manager.broadcast(room_id, {
             "type": "all_ready",
@@ -268,50 +277,71 @@ async def check_all_ready(room_id: str, room):
 
 
 async def start_game(room_id: str, room):
-    """开始游戏 - 分配禁忌词并启动任务定时器"""
+    print(f"[START_GAME] Starting game for room {room_id}")
+
+    # 防重入锁：如果游戏已经在进行中，忽略重复请求
+    if room.status == "playing":
+        print(f"[START_GAME] Game already in progress, ignoring duplicate request")
+        return
+
     room.status = "playing"
+    print(f"[START_GAME] room.status set to 'playing'")
 
     game = get_or_create_game(room_id, room.players)
     game.state.is_active = True
     game.state.taboo_words = game.distribute_taboo_words()
     game.state.round = 1
-    game.state.violations = {}  # 重置惩罚计数
+    game.state.violations = {}
+
+    print(f"[START_GAME] taboo_words distributed: {game.state.taboo_words}")
+
+    # 广播开始游戏消息给所有人
+    connections = manager.get_room_connections(room_id)
+    print(f"[START_GAME] Broadcasting to {len(connections)} connections:")
+    for conn in connections:
+        print(f"  - player_id={conn['player_id']}, nickname={conn['nickname']}")
 
     await manager.broadcast(room_id, {
         "type": "game_start",
         "room": room.model_dump(),
         "round": game.state.round
     })
+    print(f"[START_GAME] game_start broadcasted to {len(connections)} players")
 
     # 单独发送给每个玩家他们应该看到的禁忌词
     for conn in manager.get_room_connections(room_id):
-        player_id = conn["player_id"]
+        pid = conn["player_id"]
         await manager.send_personal(conn["websocket"], {
             "type": "taboo_words",
-            "words": game.get_filtered_taboo_words(player_id),
-            "my_word": game.state.taboo_words.get(player_id, "未分配")
+            "words": game.get_filtered_taboo_words(pid),
+            "my_word": game.state.taboo_words.get(pid, "未分配")
         })
+    print(f"[START_GAME] taboo_words sent to each player")
 
     # 启动任务定时器
     asyncio.create_task(game_loop(room_id))
+    print(f"[START_GAME] game_loop task created")
 
 
 async def game_loop(room_id: str):
-    """游戏循环 - 定时派发任务"""
+    print(f"[GAME_LOOP] Started for room {room_id}")
     room = rooms_db.get(room_id)
     if not room:
+        print(f"[GAME_LOOP] Room not found, exiting")
         return
 
     game = get_or_create_game(room_id, room.players)
 
     while game.state.is_active and room.status == "playing":
         wait_time = random.randint(TASK_INTERVAL_MIN, TASK_INTERVAL_MAX)
+        print(f"[GAME_LOOP] Waiting {wait_time}s before next task")
         await asyncio.sleep(wait_time)
 
         if not game.state.is_active:
             break
 
         task = game.generate_task()
+        print(f"[GAME_LOOP] Generated task: {task.description}")
 
         await manager.broadcast(room_id, {
             "type": "new_task",
@@ -329,7 +359,6 @@ async def game_loop(room_id: str):
 
 
 async def end_game(room_id: str, room):
-    """结束游戏"""
     game = get_or_create_game(room_id, room.players)
     game.end_game()
 

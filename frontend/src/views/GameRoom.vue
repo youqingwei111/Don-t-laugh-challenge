@@ -93,6 +93,10 @@
             <span v-if="!webrtc.localStream.value" class="connecting">连接中...</span>
           </div>
           <!-- 本地玩家看不到自己的禁忌词 -->
+          <div class="taboo-word self">
+            <span class="taboo-label">你的禁忌词</span>
+            <span class="taboo-mystery">???</span>
+          </div>
 
           <!-- 惩罚标记 -->
           <div v-if="myViolationCount > 0" class="punishment-overlay">
@@ -124,9 +128,10 @@
             <span v-if="!webrtc.remoteStreams.value[player.id]" class="connecting">等待连接...</span>
           </div>
 
-          <!-- 显示该玩家的禁忌词 -->
+          <!-- 显示该玩家的禁忌词（左上角） -->
           <div class="taboo-word" v-if="tabooWords[player.nickname]">
-            {{ tabooWords[player.nickname] }}
+            <span class="taboo-icon">🔇</span>
+            <span class="taboo-text">{{ tabooWords[player.nickname] }}</span>
           </div>
 
           <!-- 惩罚标记（红色X + 计数） -->
@@ -143,14 +148,14 @@
             <div class="eliminated-text">OUT</div>
           </div>
 
-          <!-- 触发禁忌按钮 -->
+          <!-- 触发禁忌按钮（右下角） -->
           <button
-            v-if="playerViolations[player.id] < 3"
+            v-if="(playerViolations[player.id] || 0) < 3"
             class="report-btn"
             @click="reportViolation(player.id, player.nickname)"
             title="举报他说禁忌词"
           >
-            ⚠️ 触发
+            ⚠️ 举报
           </button>
         </div>
 
@@ -351,6 +356,8 @@ function getPlayerName(playerId) {
 
 // -------------------- WebSocket 消息处理 --------------------
 function handleMessage(data) {
+  console.log('[GameRoom handleMessage]', data)
+
   switch (data.type) {
     case 'player_joined':
     case 'player_left':
@@ -372,35 +379,45 @@ function handleMessage(data) {
       break
 
     case 'game_start':
+      console.log('[GameRoom] game_start received, updating state')
       roomStore.currentRoom = { ...room.value, status: 'playing' }
       gameStatus.value = 'playing'
       currentRound.value = data.round || 1
       // 重置惩罚状态
       playerViolations.value = {}
       finalViolations.value = {}
+      console.log('[GameRoom] gameStatus set to playing, gameStatus.value =', gameStatus.value)
       showMessage('游戏开始！正在连接视频...', 'success')
-      setTimeout(() => initWebRTC(), 100)
+      // 重要：必须等 initWebRTC 完全完成（包括摄像头获取成功），才能处理后续信令
+      initWebRTC().catch(err => {
+        console.error('[GameRoom] initWebRTC failed:', err)
+      })
       break
 
     case 'taboo_words':
-      tabooWords.value = data.words
-      myTabooWord.value = data.my_word
-      console.log('禁忌词已更新:', tabooWords.value)
+      console.log('[GameRoom] taboo_words received:', data)
+      tabooWords.value = data.words || {}
+      myTabooWord.value = data.my_word || ''
+      console.log('[GameRoom] tabooWords updated:', tabooWords.value)
       break
 
     case 'new_task':
+      console.log('[GameRoom] new_task received:', data)
       currentTask.value = {
-        id: data.task.id,
-        description: data.task.description,
-        target_player_id: data.task.target_player_id,
-        target_player_name: data.task.target_player_name
+        id: data.task?.id,
+        description: data.task?.description || '',
+        target_player_id: data.task?.target_player_id,
+        target_player_name: data.task?.target_player_name
       }
       currentRound.value = data.round || currentRound.value
       startTaskCountdown()
-      taskHistory.value.unshift(data.task.description)
-      if (taskHistory.value.length > 10) {
-        taskHistory.value.pop()
+      if (data.task?.description) {
+        taskHistory.value.unshift(data.task.description)
+        if (taskHistory.value.length > 10) {
+          taskHistory.value.pop()
+        }
       }
+      console.log('[GameRoom] currentTask updated:', currentTask.value)
       break
 
     case 'violation_punished':
@@ -495,10 +512,12 @@ function startTaskCountdown() {
 
 // -------------------- WebRTC 信令回调 --------------------
 function sendOffer(targetId, offer) {
+  console.log(`[GameRoom] sendOffer to ${targetId}:`, offer)
   send({ type: 'offer', target_id: targetId, offer, from_nickname: playerStore.nickname })
 }
 
 function sendAnswer(targetId, answer) {
+  console.log(`[GameRoom] sendAnswer to ${targetId}:`, answer)
   send({ type: 'answer', target_id: targetId, answer })
 }
 
@@ -509,62 +528,85 @@ function sendIceCandidate(data) {
 // -------------------- 初始化 WebRTC --------------------
 async function initWebRTC() {
   try {
+    // 先设置发送回调
+    webrtc.setSendCallbacks(sendOffer, sendAnswer, sendIceCandidate)
+
     await webrtc.getLocalStream()
 
     if (localVideoRef.value && webrtc.localStream.value) {
       localVideoRef.value.srcObject = webrtc.localStream.value
     }
 
+    // 为每个远程玩家创建连接并发送 offer
+    // 使用字典序比较解决同时发送 Offer 的竞态条件（Glare）
+    // 只有 localPlayerId > targetId 时才主动发送 Offer
     for (const player of otherPlayers.value) {
-      webrtc.createConnection(
-        player.id,
-        playerStore.id,
-        playerStore.nickname,
-        sendOffer,
-        sendAnswer,
-        sendIceCandidate
-      )
+      webrtc.createConnection(player.id)
+      console.log(`[GameRoom] 为 ${player.id} 创建连接，localPlayerId=${playerStore.id}`)
 
-      await nextTick()
-      webrtc.createAndSendOffer(player.id)
+      // 字典序比较：只有本地 ID 更大时才主动发 Offer
+      if (playerStore.id > player.id) {
+        console.log(`[GameRoom] ${playerStore.id} > ${player.id}，主动发送 Offer`)
+        await nextTick()
+        await webrtc.createAndSendOffer(player.id)
+      } else {
+        console.log(`[GameRoom] ${playerStore.id} < ${player.id}，等待对方 Offer`)
+      }
     }
+
+    console.log(`[GameRoom] initWebRTC 完成，共为 ${otherPlayers.value.length} 个玩家创建连接`)
 
   } catch (err) {
     console.error('初始化 WebRTC 失败:', err)
-    webrtc.error.value = '视频初始化失败，请检查摄像头权限'
+    // 友好提示：如果是因为 HTTPS/HTTP 安全限制
+    if (err.message.includes('HTTPS') || err.message.includes('安全限制') || err.message.includes('localhost')) {
+      alert('无法访问摄像头：' + err.message + '\n\n请使用以下方式访问：\n1. https://localhost:5173\n2. https://你的局域网IP:5173')
+    } else {
+      alert('视频初始化失败，请检查浏览器权限设置')
+    }
+    webrtc.error.value = '视频初始化失败：' + err.message
   }
 }
 
 // -------------------- 处理收到的信令消息 --------------------
 async function handleIncomingOffer(data) {
-  console.log(`收到 ${data.from_nickname} 的 offer`)
+  console.log(`[GameRoom] 收到 ${data.from_nickname} (${data.from_id}) 的 offer`)
 
-  if (!webrtc.peerConnections.value[data.from_id]) {
-    webrtc.createConnection(
-      data.from_id,
-      playerStore.id,
-      playerStore.nickname,
-      sendOffer,
-      sendAnswer,
-      sendIceCandidate
-    )
+  // 确保发送回调已设置
+  webrtc.setSendCallbacks(sendOffer, sendAnswer, sendIceCandidate)
+
+  // 确保 localStream 已准备好再创建连接
+  if (!webrtc.localStream.value) {
+    console.log('[GameRoom] localStream 尚未准备好，等待中...')
+    // 等待 localStream 就绪（最多等5秒）
+    let waited = 0
+    while (!webrtc.localStream.value && waited < 5000) {
+      await new Promise(resolve => setTimeout(resolve, 100))
+      waited += 100
+    }
+    if (!webrtc.localStream.value) {
+      console.error('[GameRoom] localStream 等待超时，无法处理 offer')
+      return
+    }
+    console.log('[GameRoom] localStream 已就绪，继续处理 offer')
   }
 
-  await webrtc.handleOffer(
-    data.from_id,
-    data.from_nickname,
-    data.offer,
-    sendAnswer
-  )
+  // 如果连接不存在，先创建
+  if (!webrtc.peerConnections.value[data.from_id]) {
+    webrtc.createConnection(data.from_id)
+  }
+
+  // 处理 offer（内部会设置 remoteDescription 并自动发送 answer）
+  await webrtc.handleOffer(data.from_id, data.from_nickname, data.offer)
 }
 
 async function handleIncomingAnswer(data) {
-  console.log(`收到 ${data.from_id} 的 answer`)
+  console.log(`[GameRoom] 收到 ${data.from_id} 的 answer`)
   await webrtc.handleAnswer(data.from_id, data.answer)
 }
 
 async function handleIncomingIceCandidate(data) {
-  console.log(`收到 ${data.from_id} 的 ICE candidate`)
+  console.log(`[GameRoom] 收到 ${data.from_id} 的 ICE candidate`)
   await webrtc.handleIceCandidate(data.from_id, data.candidate)
 }
 
@@ -625,7 +667,7 @@ function leaveGame() {
   router.push('/')
 }
 
-const { connect, send, disconnect } = useWebSocket(
+const { connect, send, disconnect, isConnected } = useWebSocket(
   roomId.value,
   playerStore,
   handleMessage
@@ -663,11 +705,30 @@ onUnmounted(() => {
 })
 
 function toggleReady() {
-  send({ type: 'ready', ready: !isCurrentPlayerReady.value })
+  console.log('[GameRoom] toggleReady called, current state:', isCurrentPlayerReady.value)
+  const result = send({ type: 'ready', ready: !isCurrentPlayerReady.value })
+  console.log('[GameRoom] toggleReady send result:', result)
 }
 
 function startGame() {
-  send({ type: 'start_game' })
+  console.log('[GameRoom] startGame() called')
+  console.log('[GameRoom] playerStore.id:', playerStore.id)
+  console.log('[GameRoom] room?.host_id:', room.value?.host_id)
+  console.log('[GameRoom] playerStore.isHost:', playerStore.isHost)
+  console.log('[GameRoom] WebSocket isConnected:', isConnected.value)
+
+  if (!isConnected.value) {
+    console.error('[GameRoom] WebSocket is not connected! Cannot start game.')
+    alert('WebSocket 连接已断开，请刷新页面重新进入房间')
+    return
+  }
+
+  const result = send({ type: 'start_game' })
+  console.log('[GameRoom] startGame send result:', result)
+
+  if (!result) {
+    console.error('[GameRoom] Failed to send start_game message')
+  }
 }
 </script>
 
@@ -858,28 +919,36 @@ button.ready {
 
 .video-grid {
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
-  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 20px;
   margin-bottom: 20px;
 }
 
+/* 每个视频槽位 */
 .video-slot {
   position: relative;
-  aspect-ratio: 4/3;
+  width: 100%;
+  aspect-ratio: 16 / 9;
   background: #1a1a1a;
-  border-radius: 8px;
+  border-radius: 12px;
   overflow: hidden;
   transition: all 0.3s;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
 }
 
 .video-slot video {
   width: 100%;
   height: 100%;
   object-fit: cover;
+  display: block;
 }
 
 .video-slot.local {
   border: 3px solid #4a90d9;
+}
+
+.video-slot.connected {
+  border: 2px solid #4caf50;
 }
 
 /* 惩罚状态：灰度 + 红框 */
@@ -892,35 +961,20 @@ button.ready {
   filter: grayscale(100%) brightness(0.4);
 }
 
-.video-slot.connected {
-  border: 2px solid #4caf50;
-}
-
+/* 玩家名字标签（底部居中） */
 .video-label {
   position: absolute;
   bottom: 8px;
-  left: 8px;
-  background: rgba(0,0,0,0.6);
-  color: white;
-  padding: 4px 8px;
-  border-radius: 4px;
-  font-size: 12px;
-}
-
-/* 禁忌词标签 */
-.taboo-word {
-  position: absolute;
-  top: 8px;
   left: 50%;
   transform: translateX(-50%);
-  background: linear-gradient(135deg, #e91e63, #9c27b0);
+  background: rgba(0, 0, 0, 0.7);
   color: white;
-  padding: 6px 12px;
-  border-radius: 12px;
+  padding: 4px 12px;
+  border-radius: 20px;
   font-size: 12px;
-  font-weight: bold;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+  font-weight: 500;
   white-space: nowrap;
+  z-index: 5;
 }
 
 .connecting {
@@ -928,24 +982,91 @@ button.ready {
   font-size: 11px;
 }
 
-.empty-video {
-  width: 100%;
-  height: 100%;
+/* ========== 禁忌词标签（左上角）========== */
+.taboo-word {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  background: rgba(0, 0, 0, 0.65);
+  color: #ffffff;
+  padding: 5px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
   display: flex;
   align-items: center;
-  justify-content: center;
-  color: #666;
-  font-size: 14px;
+  gap: 5px;
+  z-index: 15;
+  backdrop-filter: blur(4px);
+  border: 1px solid rgba(255, 255, 255, 0.15);
 }
 
-/* 惩罚叠加层 */
+.taboo-icon {
+  font-size: 13px;
+}
+
+.taboo-text {
+  letter-spacing: 0.5px;
+}
+
+/* 本地玩家的禁忌词（显示 ???） */
+.taboo-word.self {
+  top: 10px;
+  left: 10px;
+  background: rgba(0, 0, 0, 0.65);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.taboo-word.self .taboo-label {
+  font-size: 10px;
+  opacity: 0.75;
+}
+
+.taboo-word.self .taboo-mystery {
+  font-size: 14px;
+  color: #ffeb3b;
+  font-weight: bold;
+  letter-spacing: 2px;
+}
+
+/* ========== 举报按钮（右下角）========== */
+.report-btn {
+  position: absolute;
+  bottom: 10px;
+  right: 10px;
+  background: linear-gradient(135deg, #e53935, #c62828);
+  color: white;
+  border: none;
+  padding: 7px 14px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: bold;
+  cursor: pointer;
+  opacity: 1;
+  transition: all 0.2s;
+  z-index: 20;
+  box-shadow: 0 2px 8px rgba(229, 57, 53, 0.5);
+  letter-spacing: 0.3px;
+}
+
+.report-btn:hover {
+  background: linear-gradient(135deg, #f44336, #e53935);
+  transform: scale(1.06);
+  box-shadow: 0 4px 14px rgba(229, 57, 53, 0.6);
+}
+
+.report-btn:active {
+  transform: scale(0.96);
+}
+
+/* ========== 惩罚 & 淘汰叠加层 ========== */
 .punishment-overlay {
   position: absolute;
   top: 0;
   left: 0;
   right: 0;
   bottom: 0;
-  background: rgba(244, 67, 54, 0.3);
+  background: rgba(244, 67, 54, 0.35);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -954,10 +1075,10 @@ button.ready {
 }
 
 .x-mark {
-  font-size: 64px;
+  font-size: 56px;
   color: #f44336;
   font-weight: bold;
-  text-shadow: 0 0 20px rgba(0,0,0,0.5);
+  text-shadow: 0 0 20px rgba(0, 0, 0, 0.5);
   animation: pulse 1s infinite;
 }
 
@@ -971,7 +1092,7 @@ button.ready {
   font-size: 18px;
   font-weight: bold;
   margin-top: 8px;
-  text-shadow: 0 2px 4px rgba(0,0,0,0.5);
+  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.5);
 }
 
 .violations-dots {
@@ -984,7 +1105,7 @@ button.ready {
   width: 12px;
   height: 12px;
   border-radius: 50%;
-  background: rgba(255,255,255,0.3);
+  background: rgba(255, 255, 255, 0.3);
   border: 2px solid white;
 }
 
@@ -999,7 +1120,7 @@ button.ready {
   left: 0;
   right: 0;
   bottom: 0;
-  background: rgba(0,0,0,0.7);
+  background: rgba(0, 0, 0, 0.75);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1007,7 +1128,7 @@ button.ready {
 }
 
 .eliminated-text {
-  font-size: 36px;
+  font-size: 32px;
   font-weight: bold;
   color: #f44336;
   text-shadow: 0 0 20px rgba(244, 67, 54, 0.8);
@@ -1020,31 +1141,23 @@ button.ready {
   to { opacity: 1; transform: scale(1.05); }
 }
 
-/* 举报按钮 */
-.report-btn {
-  position: absolute;
-  top: 40px;
-  right: 8px;
-  background: rgba(255, 152, 0, 0.9);
-  color: white;
-  border: none;
-  padding: 6px 10px;
-  border-radius: 4px;
-  font-size: 11px;
-  cursor: pointer;
-  opacity: 0;
-  transition: opacity 0.2s;
-  z-index: 20;
+.empty-video {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #555;
+  font-size: 14px;
+  background: #111;
 }
 
-.video-slot:hover .report-btn {
-  opacity: 1;
+.video-slot.empty {
+  background: #111;
+  border: 2px dashed #333;
 }
 
-.report-btn:hover {
-  background: #ff9800;
-}
-
+/* ========== 控制栏 ========== */
 .controls {
   display: flex;
   gap: 16px;

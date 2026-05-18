@@ -33,8 +33,6 @@ const ICE_SERVERS = [
 function createPeerConnection() {
   return new RTCPeerConnection({
     iceServers: ICE_SERVERS,
-    // 禁用 BUNDLE 可以避免多路复用问题，方便调试
-    // bundlePolicy: 'max-compat'
   })
 }
 
@@ -55,21 +53,34 @@ export function useWebRTC() {
   // 错误信息
   const error = ref(null)
 
+  // ICE 候选者队列：解决竞态条件（candidate 在 setRemoteDescription 之前到达）
+  const iceCandidateQueues = ref({})
+
+  // 发送回调的引用（由 GameRoom 在创建连接时传入）
+  let sendOfferCallback = null
+  let sendAnswerCallback = null
+  let sendIceCandidateCallback = null
+
   /**
    * 获取本地摄像头权限并返回媒体流
    * @returns {Promise<MediaStream>}
    */
   async function getLocalStream() {
     try {
+      // 安全检查：navigator.mediaDevices 在非安全环境（HTTP）下可能为 undefined
+      if (!navigator.mediaDevices) {
+        const errMsg = '浏览器安全限制：请使用 HTTPS 或 localhost 访问以开启摄像头'
+        console.error('getLocalStream failed:', errMsg)
+        error.value = errMsg
+        throw new Error(errMsg)
+      }
+
       // 请求摄像头和麦克风权限
-      // constraints 详细指定了视频参数，避免兼容性问题
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
           width: { ideal: 640 },
           height: { ideal: 480 },
           frameRate: { ideal: 15 }
-          // 使用前置摄像头（如果存在）
-          // facingMode: 'user'
         },
         audio: {
           echoCancellation: true,
@@ -82,61 +93,98 @@ export function useWebRTC() {
 
     } catch (err) {
       console.error('获取摄像头权限失败:', err)
-      error.value = '无法访问摄像头，请检查浏览器权限设置'
+      if (err.message.includes('浏览器安全限制')) {
+        error.value = err.message
+      } else {
+        error.value = '无法访问摄像头，请检查浏览器权限设置'
+      }
       throw err
     }
   }
 
   /**
-   * 为指定玩家创建 WebRTC 连接
-   * @param {string} targetPlayerId - 目标玩家 ID
-   * @param {string} localPlayerId - 本地玩家 ID（用于标识）
-   * @param {string} localNickname - 本地昵称（用于显示）
-   * @param {Function} onSendOffer - 发送 offer 的回调
-   * @param {Function} onSendAnswer - 发送 answer 的回调
-   * @param {Function} onSendIceCandidate - 发送 ICE candidate 的回调
-   * @returns {RTCPeerConnection}
+   * 设置发送回调（由 GameRoom 调用一次）
    */
-  function createConnection(targetPlayerId, localPlayerId, localNickname, onSendOffer, onSendAnswer, onSendIceCandidate) {
+  function setSendCallbacks(offerCb, answerCb, iceCb) {
+    sendOfferCallback = offerCb
+    sendAnswerCallback = answerCb
+    sendIceCandidateCallback = iceCb
+    console.log('[WebRTC] Send callbacks registered')
+  }
+
+  /**
+   * 处理 ICE 候选者队列
+   * 当 remoteDescription 设置好后，调用此方法消费队列
+   */
+  async function processIceCandidateQueue(playerId) {
+    const pc = peerConnections.value[playerId]
+    if (!pc) return
+
+    const queue = iceCandidateQueues.value[playerId] || []
+    console.log(`[WebRTC] Processing ICE queue for ${playerId}, ${queue.length} candidates`)
+
+    while (queue.length > 0) {
+      const candidate = queue.shift()
+      try {
+        await pc.addIceCandidate(new RTCIceCandidate(candidate))
+        console.log(`[WebRTC] Queued ICE candidate added for ${playerId}`)
+      } catch (err) {
+        console.error(`[WebRTC] Failed to add queued ICE candidate:`, err)
+      }
+    }
+  }
+
+  /**
+   * 为指定玩家创建 WebRTC 连接
+   * 必须在 localStream 准备好之后才能调用！
+   */
+  function createConnection(targetPlayerId) {
     // 如果已存在连接，直接返回
     if (peerConnections.value[targetPlayerId]) {
       return peerConnections.value[targetPlayerId]
     }
 
-    const pc = createPeerConnection()
-
-    // ---- 添加本地媒体轨道到连接 ----
-    // 这样对方才能收到我们的视频/音频
-    if (localStream.value) {
-      localStream.value.getTracks().forEach(track => {
-        pc.addTrack(track, localStream.value)
-      })
+    // 致命检查：localStream 必须已经获取到
+    if (!localStream.value) {
+      console.error('[WebRTC] 致命错误：尝试创建连接时，本地视频流尚未获取到！')
+      error.value = '本地视频流未就绪，无法创建连接'
+      throw new Error('localStream is null - must call getLocalStream() first')
     }
 
+    // 初始化 ICE 候选者队列
+    iceCandidateQueues.value[targetPlayerId] = []
+
+    const pc = createPeerConnection()
+
+    // ---- 挂载本地媒体轨道到连接 ----
+    console.log('[WebRTC] 挂载本地媒体轨道到连接')
+    localStream.value.getTracks().forEach(track => {
+      pc.addTrack(track, localStream.value)
+      console.log(`[WebRTC] addTrack: ${track.kind}, label: ${track.label}`)
+    })
+
     // ---- 处理接收到远程视频轨道 ----
-    // 当对方添加视频轨道时，我们会收到这个事件
     pc.ontrack = (event) => {
-      console.log(`收到 ${targetPlayerId} 的视频轨道:`, event.streams[0])
+      console.log(`[WebRTC] 收到 ${targetPlayerId} 的视频轨道`)
       remoteStreams.value[targetPlayerId] = event.streams[0]
     }
 
     // ---- 处理 ICE 候选地址 ----
-    // 每次发现一个新的候选地址时触发
-    // 需要通过 WebSocket 发送给对方
     pc.onicecandidate = (event) => {
       if (event.candidate) {
-        console.log(`ICE candidate for ${targetPlayerId}:`, event.candidate)
-        onSendIceCandidate({
-          target_id: targetPlayerId,
-          candidate: event.candidate
-        })
+        console.log(`[WebRTC] ICE candidate for ${targetPlayerId}:`, event.candidate)
+        if (sendIceCandidateCallback) {
+          sendIceCandidateCallback({
+            target_id: targetPlayerId,
+            candidate: event.candidate
+          })
+        }
       }
     }
 
     // ---- 处理连接状态变化 ----
-    // 用于调试连接问题
     pc.onconnectionstatechange = () => {
-      console.log(`与 ${targetPlayerId} 的连接状态: ${pc.connectionState}`)
+      console.log(`[WebRTC] 与 ${targetPlayerId} 的连接状态: ${pc.connectionState}`)
       if (pc.connectionState === 'failed') {
         error.value = `与 ${targetPlayerId} 的连接失败`
       }
@@ -144,135 +192,153 @@ export function useWebRTC() {
 
     // ---- 处理 ICE 连接状态变化 ----
     pc.oniceconnectionstatechange = () => {
-      console.log(`ICE 连接状态 (${targetPlayerId}): ${pc.iceConnectionState}`)
+      console.log(`[WebRTC] ICE 连接状态 (${targetPlayerId}): ${pc.iceConnectionState}`)
     }
 
     // 保存连接
     peerConnections.value[targetPlayerId] = pc
+    console.log(`[WebRTC] Created connection for ${targetPlayerId}`)
 
     return pc
   }
 
   /**
-   * 创建并发送 offer
-   * @param {string} targetPlayerId - 目标玩家 ID
+   * 创建并发送 offer（主动呼叫方）
    */
   async function createAndSendOffer(targetPlayerId) {
     const pc = peerConnections.value[targetPlayerId]
     if (!pc) {
-      console.error(`无法创建 offer: ${targetPlayerId} 的连接不存在`)
+      console.error(`[WebRTC] 无法创建 offer: ${targetPlayerId} 的连接不存在`)
       return
     }
 
     try {
       // 创建 offer SDP
-      // 可选参数: offerToReceiveAudio/Video 是否愿意接收音视频
       const offer = await pc.createOffer({
         offerToReceiveAudio: 1,
         offerToReceiveVideo: 1
       })
 
       // 设置为本地描述
-      // 这步很重要，不设置的话 offer SDP 不会生效
       await pc.setLocalDescription(offer)
+      console.log(`[WebRTC] Offer created, local description set for ${targetPlayerId}`)
 
-      console.log(`创建 offer 成功，发送给 ${targetPlayerId}`)
+      // 真正发送 offer 给对方！传递两个独立参数
+      if (sendOfferCallback) {
+        console.log(`[WebRTC] Sending offer to ${targetPlayerId}`)
+        sendOfferCallback(targetPlayerId, pc.localDescription)
+      } else {
+        console.error(`[WebRTC] sendOfferCallback is null!`)
+      }
 
     } catch (err) {
-      console.error(`创建 offer 失败:`, err)
+      console.error(`[WebRTC] 创建 offer 失败:`, err)
       error.value = '创建连接失败'
     }
   }
 
   /**
-   * 处理收到的 offer（作为被呼叫方）
-   * @param {string} fromId - 发送者 ID
-   * @param {string} fromNickname - 发送者昵称
-   * @param {Object} offer - SDP offer 对象
-   * @param {Function} onSendAnswer - 发送 answer 的回调
+   * 处理收到的 offer（被呼叫方）
    */
-  async function handleOffer(fromId, fromNickname, offer, onSendAnswer) {
+  async function handleOffer(fromId, fromNickname, offer) {
+    console.log(`[WebRTC] 收到来自 ${fromNickname} (${fromId}) 的 offer`)
+
     // 确保连接已创建
-    // 如果还没连接，先创建（被动方也需要创建连接）
     if (!peerConnections.value[fromId]) {
-      console.log(`收到来自 ${fromNickname} 的 offer，创建连接`)
-      // 这里的回调暂时传空，后续会通过 handleAnswer 设置正确的回调
-      createConnection(fromId, '', '', () => {}, () => {}, () => {})
+      console.log(`[WebRTC] 为 ${fromId} 创建连接（被动方）`)
+      createConnection(fromId)
     }
 
     const pc = peerConnections.value[fromId]
-    if (!pc) return
+    if (!pc) {
+      console.error(`[WebRTC] 无法处理 offer: 连接不存在`)
+      return
+    }
 
     try {
       // 将收到的 offer SDP 设置为远端描述
       await pc.setRemoteDescription(new RTCSessionDescription(offer))
+      console.log(`[WebRTC] Remote description set for ${fromId} (from offer)`)
+
+      // 处理队列中的 ICE candidate（可能在 setRemoteDescription 之前到达）
+      await processIceCandidateQueue(fromId)
 
       // 创建 answer SDP
       const answer = await pc.createAnswer()
       await pc.setLocalDescription(answer)
+      console.log(`[WebRTC] Answer created for ${fromId}`)
 
-      console.log(`创建 answer 成功，发送给 ${fromId}`)
-
-      // 发送 answer 给对方
-      onSendAnswer({
-        target_id: fromId,
-        answer: answer
-      })
+      // 发送 answer 给对方！传递两个独立参数
+      if (sendAnswerCallback) {
+        console.log(`[WebRTC] Sending answer to ${fromId}`)
+        sendAnswerCallback(fromId, pc.localDescription)
+      } else {
+        console.error(`[WebRTC] sendAnswerCallback is null!`)
+      }
 
     } catch (err) {
-      console.error(`处理 offer 失败:`, err)
+      console.error(`[WebRTC] 处理 offer 失败:`, err)
       error.value = '处理连接请求失败'
     }
   }
 
   /**
    * 处理收到的 answer
-   * @param {string} fromId - 发送者 ID
-   * @param {Object} answer - SDP answer 对象
    */
   async function handleAnswer(fromId, answer) {
+    console.log(`[WebRTC] 收到 ${fromId} 的 answer`)
     const pc = peerConnections.value[fromId]
     if (!pc) {
-      console.error(`无法处理 answer: ${fromId} 的连接不存在`)
+      console.error(`[WebRTC] 无法处理 answer: ${fromId} 的连接不存在`)
       return
     }
 
     try {
       // 将收到的 answer SDP 设置为远端描述
       await pc.setRemoteDescription(new RTCSessionDescription(answer))
-      console.log(`收到 ${fromId} 的 answer，连接建立中...`)
+      console.log(`[WebRTC] Remote description set for ${fromId} (from answer)`)
+
+      // 处理队列中的 ICE candidate
+      await processIceCandidateQueue(fromId)
 
     } catch (err) {
-      console.error(`处理 answer 失败:`, err)
+      console.error(`[WebRTC] 处理 answer 失败:`, err)
       error.value = '建立连接失败'
     }
   }
 
   /**
    * 处理收到的 ICE candidate
-   * @param {string} fromId - 发送者 ID
-   * @param {Object} candidate - ICE candidate 对象
+   * 解决竞态条件：如果 remoteDescription 还没设置好，先放入队列
    */
   async function handleIceCandidate(fromId, candidate) {
     const pc = peerConnections.value[fromId]
     if (!pc) {
-      console.error(`无法处理 ICE candidate: ${fromId} 的连接不存在`)
+      console.error(`[WebRTC] 无法处理 ICE candidate: ${fromId} 的连接不存在`)
       return
     }
 
     try {
-      // 将收到的 ICE candidate 添加到 ICE 代理
-      await pc.addIceCandidate(new RTCIceCandidate(candidate))
-      console.log(`收到 ${fromId} 的 ICE candidate`)
-
+      // 检查 remoteDescription 是否已设置
+      if (pc.remoteDescription === null || pc.remoteDescription === undefined) {
+        // 还没设置好，先放入队列
+        if (!iceCandidateQueues.value[fromId]) {
+          iceCandidateQueues.value[fromId] = []
+        }
+        iceCandidateQueues.value[fromId].push(candidate)
+        console.log(`[WebRTC] ICE candidate queued for ${fromId} (remoteDescription not ready yet), queue size: ${iceCandidateQueues.value[fromId].length}`)
+      } else {
+        // remoteDescription 已设置，直接添加
+        await pc.addIceCandidate(new RTCIceCandidate(candidate))
+        console.log(`[WebRTC] ICE candidate added for ${fromId}`)
+      }
     } catch (err) {
-      console.error(`处理 ICE candidate 失败:`, err)
+      console.error(`[WebRTC] 处理 ICE candidate 失败:`, err)
     }
   }
 
   /**
    * 关闭指定玩家的连接
-   * @param {string} playerId
    */
   function closeConnection(playerId) {
     const pc = peerConnections.value[playerId]
@@ -281,6 +347,7 @@ export function useWebRTC() {
       delete peerConnections.value[playerId]
     }
     delete remoteStreams.value[playerId]
+    delete iceCandidateQueues.value[playerId]
   }
 
   /**
@@ -299,6 +366,7 @@ export function useWebRTC() {
     }
 
     error.value = null
+    iceCandidateQueues.value = {}
   }
 
   return {
@@ -307,6 +375,7 @@ export function useWebRTC() {
     remoteStreams,
     error,
     getLocalStream,
+    setSendCallbacks,
     createConnection,
     createAndSendOffer,
     handleOffer,
