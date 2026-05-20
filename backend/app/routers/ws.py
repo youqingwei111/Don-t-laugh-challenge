@@ -177,6 +177,11 @@ async def handle_message(websocket: WebSocket, room_id: str, player_id: str, dat
         print(f"[AUTO_REPORT] player={player_id} action={action}")
         await process_auto_violation(room_id, room, player_id, action)
 
+    elif msg_type == "speech_transcript":
+        transcript = data.get("text", "").strip()
+        print(f"[SPEECH] player={player_id} transcript='{transcript}'")
+        await process_speech_transcript(room_id, room, player_id, transcript)
+
     elif msg_type == "request_rematch":
         if room.host_id == player_id:
             await reset_game(room_id, room)
@@ -235,9 +240,17 @@ async def process_violation(room_id: str, room, reported_player_id: str, reporte
             "violation_count": current_violations
         })
 
-    # ---- 为犯规玩家重新分配禁忌词和禁忌动作（不论是否被淘汰）----
-    new_word, new_action = game.replace_taboo_word(reported_player_id)
-    print(f"[VIOLATION] Replaced taboo word+action for {reported_player_id}, new word={new_word} action={new_action}")
+    # ---- 为犯规玩家精准替换禁忌词或禁忌动作（二选一）----
+    if violation_type == "word":
+        new_word = game.replace_taboo_word_only(reported_player_id)
+        print(f"[VIOLATION] Replaced word only for {reported_player_id}, new word={new_word}")
+    elif violation_type == "action":
+        new_action = game.replace_taboo_action_only(reported_player_id)
+        print(f"[VIOLATION] Replaced action only for {reported_player_id}, new action={new_action}")
+    else:
+        # 兜底：同时替换（兼容旧逻辑）
+        new_word, new_action = game.replace_taboo_word(reported_player_id)
+        print(f"[VIOLATION] Replaced both for {reported_player_id}")
 
     # ---- 广播更新后的禁忌词+动作给房间内所有玩家（带过滤）----
     for conn in manager.get_room_connections(room_id):
@@ -270,6 +283,54 @@ async def process_auto_violation(room_id: str, room, player_id: str, action: str
         print(f"[AUTO_VIOLATION] No match, ignoring action")
 
 
+# -------------------- 语音识别防抖追踪 --------------------
+# player_id -> { last_text: str, last_time: float }  防止同一句话重复扣分
+_speech_processed: dict = {}
+_SPEECH_DEBOUNCE_SECONDS = 3.0  # 同一玩家处理后 3 秒内不重复扣分
+
+
+async def process_speech_transcript(room_id: str, room, player_id: str, transcript: str):
+    """
+    处理前端语音识别器上报的文本。
+    检查该文本是否包含该玩家的禁忌词，如果匹配则触发惩罚。
+    带防抖机制：同一句话（及其相近表述）在短时间内不会重复触发。
+    """
+    import time
+    now = time.time()
+
+    if not transcript:
+        return
+
+    game = get_or_create_game(room_id, room.players)
+    taboo_word = game.state.taboo_words.get(player_id, "")
+
+    if not taboo_word:
+        return
+
+    # ---- 防抖：检查该玩家是否在短时间内处理过相似文本 ----
+    last_info = _speech_processed.get(player_id)
+    if last_info is not None:
+        time_delta = now - last_info["last_time"]
+        # 如果距离上次处理时间太短，跳过
+        if time_delta < _SPEECH_DEBOUNCE_SECONDS:
+            print(f"[SPEECH] Debounce: player={player_id} hit {time_delta:.1f}s ago, ignoring")
+            return
+        # 如果文本完全相同（连续识别重复发送），也跳过
+        if last_info["last_text"] == transcript:
+            print(f"[SPEECH] Debounce: same transcript '{transcript}', ignoring")
+            return
+
+    # ---- 禁忌词匹配检测（模糊匹配，词出现在句子中）----
+    if taboo_word in transcript:
+        print(f"[SPEECH] VIOLATION! player={player_id} taboo_word='{taboo_word}' found in '{transcript}'")
+        # 记录本次处理，防止重复
+        _speech_processed[player_id] = {"last_text": transcript, "last_time": now}
+        # 触发惩罚（reporter_id 为 "system"，violation_type 为 "word"）
+        await process_violation(room_id, room, player_id, "system", "word")
+    else:
+        print(f"[SPEECH] No match: '{taboo_word}' not in '{transcript}'")
+
+
 async def reset_game(room_id: str, room):
     print(f"[RESET] Resetting game for room {room_id}")
     game = get_or_create_game(room_id, room.players)
@@ -285,6 +346,11 @@ async def reset_game(room_id: str, room):
     game.state.round = 1
 
     room.status = "waiting"
+
+    # 清除该房间所有玩家的语音防抖记录
+    for player in room.players:
+        if player.id in _speech_processed:
+            del _speech_processed[player.id]
 
     await manager.broadcast(room_id, {
         "type": "game_reset",
@@ -302,6 +368,10 @@ async def handle_leave_game(room_id: str, room, player_id: str):
     player = room.get_player(player_id)
     if player:
         player.is_ready = False
+
+    # 清除离场玩家的语音防抖记录
+    if player_id in _speech_processed:
+        del _speech_processed[player_id]
 
     await manager.broadcast(room_id, {
         "type": "player_left",

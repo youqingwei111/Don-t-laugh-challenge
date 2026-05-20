@@ -161,16 +161,6 @@
             <div v-if="playerViolations[player.id] >= 3" class="eliminated-overlay">
               <div class="eliminated-text">OUT</div>
             </div>
-
-            <!-- 触发禁忌按钮（右下角） -->
-            <button
-              v-if="(playerViolations[player.id] || 0) < 3"
-              class="report-btn"
-              @click="reportViolation(player.id, player.nickname)"
-              title="举报他说禁忌词"
-            >
-              ⚠️ 举报
-            </button>
           </div>
 
           <!-- 空槽位（凑不够5人时显示） -->
@@ -276,6 +266,7 @@ import { useRoomStore } from '../stores/room'
 import { useWebSocket } from '../api/websocket'
 import { useWebRTC } from '../utils/webrtc'
 import { ActionDetector } from '../utils/actionDetector'
+import { SpeechDetector } from '../utils/speechDetector'
 
 const route = useRoute()
 const router = useRouter()
@@ -325,6 +316,9 @@ const isVideoOff = ref(false)
 
 // ---- 动作检测器 ----
 let actionDetector = null
+
+// ---- 语音识别器 ----
+let speechDetector = null
 
 // WebRTC 实例
 const webrtc = useWebRTC()
@@ -416,6 +410,8 @@ function handleMessage(data) {
       initWebRTC().catch(err => {
         console.error('[GameRoom] initWebRTC failed:', err)
       })
+      // 同时启动语音识别（与摄像头获取并行进行）
+      startSpeechDetector()
       break
 
     case 'taboo_words':
@@ -479,6 +475,8 @@ function handleMessage(data) {
       taskHistory.value = []
       currentRound.value = 1
       roomStore.currentRoom = data.room
+      if (speechDetector) speechDetector.stop()
+      if (actionDetector) actionDetector.stop()
       showMessage('游戏已重置，等待准备...', 'info')
       break
 
@@ -502,15 +500,6 @@ function handleMessage(data) {
 }
 
 // -------------------- 举报触发禁忌词 --------------------
-function reportViolation(targetPlayerId, targetNickname) {
-  if (confirm(`确定要举报 "${targetNickname}" 说了禁忌词吗？`)) {
-    send({
-      type: 'report_violation',
-      reported_player_id: targetPlayerId
-    })
-  }
-}
-
 // -------------------- 请求重来一局 --------------------
 function requestRematch() {
   send({ type: 'request_rematch' })
@@ -570,6 +559,35 @@ function startActionDetector() {
   actionDetector.start(localVideoRef.value).catch(err => {
     console.error('[ActionDetector] 启动失败:', err)
   })
+}
+
+// -------------------- 启动语音识别器 --------------------
+function startSpeechDetector() {
+  if (speechDetector) {
+    speechDetector.stop()
+  }
+
+  speechDetector = new SpeechDetector({
+    onTranscript: (text) => {
+      console.log(`[SpeechDetector] 识别到文本: "${text}"`)
+      // 将识别出的文本发送给后端进行禁忌词比对
+      send({
+        type: 'speech_transcript',
+        text: text
+      })
+    },
+    onError: (error) => {
+      console.error('[SpeechDetector] 识别错误:', error)
+    },
+    onStart: () => {
+      console.log('[SpeechDetector] 语音识别已启动')
+    },
+    onEnd: () => {
+      console.log('[SpeechDetector] 语音识别已结束')
+    }
+  })
+
+  speechDetector.start()
 }
 
 // -------------------- 初始化 WebRTC --------------------
@@ -704,6 +722,8 @@ function showMessage(msg, type = 'info') {
 }
 
 function leaveGame() {
+  if (speechDetector) speechDetector.stop()
+  if (actionDetector) actionDetector.stop()
   webrtc.closeAllConnections()
   gameStatus.value = 'waiting'
   roomStore.currentRoom = { ...room.value, status: 'waiting' }
@@ -749,6 +769,9 @@ onMounted(async () => {
 onUnmounted(() => {
   if (actionDetector) {
     actionDetector.stop()
+  }
+  if (speechDetector) {
+    speechDetector.stop()
   }
   webrtc.closeAllConnections()
   disconnect()
@@ -899,12 +922,12 @@ button {
   transition: all 0.2s;
 }
 
-button:not(.start-btn, .leave-btn, .rematch-btn, .report-btn) {
+button:not(.start-btn, .leave-btn, .rematch-btn) {
   background: #e8e8e8;
   color: #333;
 }
 
-button:not(.start-btn, .leave-btn, .rematch-btn, .report-btn):hover {
+button:not(.start-btn, .leave-btn, .rematch-btn):hover {
   background: #ddd;
 }
 
@@ -1083,35 +1106,6 @@ button.ready {
   letter-spacing: 2px;
 }
 
-/* ========== 举报按钮（右下角）========== */
-.report-btn {
-  position: absolute;
-  bottom: 10px;
-  right: 10px;
-  background: linear-gradient(135deg, #e53935, #c62828);
-  color: white;
-  border: none;
-  padding: 7px 14px;
-  border-radius: 6px;
-  font-size: 12px;
-  font-weight: bold;
-  cursor: pointer;
-  opacity: 1;
-  transition: all 0.2s;
-  z-index: 20;
-  box-shadow: 0 2px 8px rgba(229, 57, 53, 0.5);
-  letter-spacing: 0.3px;
-}
-
-.report-btn:hover {
-  background: linear-gradient(135deg, #f44336, #e53935);
-  transform: scale(1.06);
-  box-shadow: 0 4px 14px rgba(229, 57, 53, 0.6);
-}
-
-.report-btn:active {
-  transform: scale(0.96);
-}
 
 /* ========== 惩罚 & 淘汰叠加层 ========== */
 .punishment-overlay {

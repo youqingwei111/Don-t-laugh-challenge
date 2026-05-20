@@ -182,12 +182,11 @@ class GameEngine:
                     }
         return filtered
 
-    def replace_taboo_word(self, player_id: str) -> tuple[str, str]:
+    def replace_taboo_word_only(self, player_id: str) -> str:
         """
-        为指定玩家重新抽取禁忌词和禁忌动作（均不与他人重复）
-        返回 (new_word, new_action)
+        仅重新抽取该玩家的禁忌词（动作保持不变）
+        新词不与房间内其他玩家当前使用的词重复
         """
-        # ---- 重新抽词 ----
         used_words = set(self.state.taboo_words.values())
         all_words = []
         for group in TABOO_WORDS.values():
@@ -197,17 +196,22 @@ class GameEngine:
             available_words = all_words
         new_word = random.choice(available_words)
         self.state.taboo_words[player_id] = new_word
+        print(f"[REPLACE] player={player_id} word_only new_word={new_word}")
+        return new_word
 
-        # ---- 重新抽动作 ----
+    def replace_taboo_action_only(self, player_id: str) -> str:
+        """
+        仅重新抽取该玩家的禁忌动作（词保持不变）
+        新动作不与房间内其他玩家当前使用的动作重复
+        """
         used_actions = set(self.state.taboo_actions.values())
         available_actions = [a for a in TABOO_ACTIONS if a not in used_actions]
         if not available_actions:
             available_actions = TABOO_ACTIONS
         new_action = random.choice(available_actions)
         self.state.taboo_actions[player_id] = new_action
-
-        print(f"[REPLACE] player={player_id} new_word={new_word} new_action={new_action}")
-        return new_word, new_action
+        print(f"[REPLACE] player={player_id} action_only new_action={new_action}")
+        return new_action
 
     def generate_task(self) -> GameTask:
         """生成一个新的随机任务"""
