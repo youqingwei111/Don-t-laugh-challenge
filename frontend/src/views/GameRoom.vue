@@ -79,94 +79,145 @@
       </div>
 
       <!-- 本地视频 + 4个远程视频 -->
-      <div class="video-grid">
-        <!-- 本地视频 -->
-        <div class="video-slot local" :class="{ punished: myViolationCount > 0 }">
-          <video
-            ref="localVideoRef"
-            autoplay
-            muted
-            playsinline
-          ></video>
-          <div class="video-label">
-            {{ playerStore.nickname }} (你)
-            <span v-if="!webrtc.localStream.value" class="connecting">连接中...</span>
-          </div>
-          <!-- 本地玩家看不到自己的禁忌词 -->
-          <div class="taboo-word self">
-            <span class="taboo-label">你的禁忌词</span>
-            <span class="taboo-mystery">???</span>
-          </div>
-
-          <!-- 惩罚标记 -->
-          <div v-if="myViolationCount > 0" class="punishment-overlay">
-            <div class="punishment-count">{{ myViolationCount }}/3</div>
-            <div class="violations-dots">
-              <span v-for="i in 3" :key="i" :class="{ filled: i <= myViolationCount }"></span>
+      <div class="game-layout">
+        <!-- 视频区域（网格） -->
+        <div class="video-grid">
+          <!-- 本地视频 -->
+          <div class="video-slot local" :class="{ punished: myViolationCount > 0 }">
+            <video
+              ref="localVideoRef"
+              autoplay
+              muted
+              playsinline
+            ></video>
+            <div class="video-label">
+              {{ playerStore.nickname }} (你)
+              <span v-if="!webrtc.localStream.value" class="connecting">连接中...</span>
             </div>
-          </div>
-        </div>
+            <!-- 本地玩家看不到自己的词和动作 -->
+            <div class="taboo-item self">
+              <div class="taboo-row">
+                <span class="taboo-icon">🔇</span>
+                <span class="taboo-word-text">???</span>
+              </div>
+              <div class="taboo-row">
+                <span class="taboo-icon">🤚</span>
+                <span class="taboo-action-text">???</span>
+              </div>
+            </div>
 
-        <!-- 远程视频 -->
-        <div
-          v-for="player in otherPlayers"
-          :key="player.id"
-          class="video-slot remote"
-          :class="{
-            connected: webrtc.remoteStreams.value[player.id],
-            punished: playerViolations[player.id] > 0,
-            eliminated: playerViolations[player.id] >= 3
-          }"
-        >
-          <video
-            :ref="el => remoteVideoRefs[player.id] = el"
-            autoplay
-            playsinline
-          ></video>
-          <div class="video-label">
-            {{ player.nickname }}
-            <span v-if="!webrtc.remoteStreams.value[player.id]" class="connecting">等待连接...</span>
-          </div>
-
-          <!-- 显示该玩家的禁忌词（左上角） -->
-          <div class="taboo-word" v-if="tabooWords[player.nickname]">
-            <span class="taboo-icon">🔇</span>
-            <span class="taboo-text">{{ tabooWords[player.nickname] }}</span>
-          </div>
-
-          <!-- 惩罚标记（红色X + 计数） -->
-          <div v-if="playerViolations[player.id] > 0" class="punishment-overlay">
-            <div class="x-mark">✕</div>
-            <div class="punishment-count">{{ playerViolations[player.id] }}/3</div>
-            <div class="violations-dots">
-              <span v-for="i in 3" :key="i" :class="{ filled: i <= playerViolations[player.id] }"></span>
+            <!-- 惩罚标记 -->
+            <div v-if="myViolationCount > 0" class="punishment-overlay">
+              <div class="punishment-count">{{ myViolationCount }}/3</div>
+              <div class="violations-dots">
+                <span v-for="i in 3" :key="i" :class="{ filled: i <= myViolationCount }"></span>
+              </div>
             </div>
           </div>
 
-          <!-- 淘汰特效 -->
-          <div v-if="playerViolations[player.id] >= 3" class="eliminated-overlay">
-            <div class="eliminated-text">OUT</div>
-          </div>
-
-          <!-- 触发禁忌按钮（右下角） -->
-          <button
-            v-if="(playerViolations[player.id] || 0) < 3"
-            class="report-btn"
-            @click="reportViolation(player.id, player.nickname)"
-            title="举报他说禁忌词"
+          <!-- 远程视频 -->
+          <div
+            v-for="player in otherPlayers"
+            :key="player.id"
+            class="video-slot remote"
+            :class="{
+              connected: webrtc.remoteStreams.value[player.id],
+              punished: playerViolations[player.id] > 0,
+              eliminated: playerViolations[player.id] >= 3
+            }"
           >
-            ⚠️ 举报
-          </button>
+            <video
+              :ref="el => remoteVideoRefs[player.id] = el"
+              autoplay
+              playsinline
+            ></video>
+            <div class="video-label">
+              {{ player.nickname }}
+              <span v-if="!webrtc.remoteStreams.value[player.id]" class="connecting">等待连接...</span>
+            </div>
+
+            <!-- 显示该玩家的禁忌词和禁忌动作（左上角） -->
+            <div class="taboo-item" v-if="tabooWords[player.nickname]">
+              <div class="taboo-row">
+                <span class="taboo-icon">🔇</span>
+                <span class="taboo-word-text">{{ tabooWords[player.nickname].word }}</span>
+              </div>
+              <div class="taboo-row">
+                <span class="taboo-icon">🤚</span>
+                <span class="taboo-action-text">{{ tabooWords[player.nickname].action }}</span>
+              </div>
+            </div>
+
+            <!-- 惩罚标记（红色X + 计数） -->
+            <div v-if="playerViolations[player.id] > 0" class="punishment-overlay">
+              <div class="x-mark">✕</div>
+              <div class="punishment-count">{{ playerViolations[player.id] }}/3</div>
+              <div class="violations-dots">
+                <span v-for="i in 3" :key="i" :class="{ filled: i <= playerViolations[player.id] }"></span>
+              </div>
+            </div>
+
+            <!-- 淘汰特效 -->
+            <div v-if="playerViolations[player.id] >= 3" class="eliminated-overlay">
+              <div class="eliminated-text">OUT</div>
+            </div>
+
+            <!-- 触发禁忌按钮（右下角） -->
+            <button
+              v-if="(playerViolations[player.id] || 0) < 3"
+              class="report-btn"
+              @click="reportViolation(player.id, player.nickname)"
+              title="举报他说禁忌词"
+            >
+              ⚠️ 举报
+            </button>
+          </div>
+
+          <!-- 空槽位（凑不够5人时显示） -->
+          <div
+            v-for="emptySlot in emptyVideoSlots"
+            :key="'empty-' + emptySlot"
+            class="video-slot empty"
+          >
+            <div class="empty-video">等待加入...</div>
+            <div class="video-label">空位</div>
+          </div>
         </div>
 
-        <!-- 空槽位（凑不够5人时显示） -->
-        <div
-          v-for="emptySlot in emptyVideoSlots"
-          :key="'empty-' + emptySlot"
-          class="video-slot empty"
-        >
-          <div class="empty-video">等待加入...</div>
-          <div class="video-label">空位</div>
+        <!-- 视频下方通知区域 -->
+        <div class="notification-area">
+          <!-- 任务通知条（展示在视频下方，不遮挡视频） -->
+          <Transition name="task-slide">
+            <div v-if="currentTask" class="task-bar">
+              <div class="task-bar-header">
+                <span class="task-icon">🎯</span>
+                <span class="task-label">随机任务</span>
+              </div>
+              <div class="task-bar-content">
+                <span class="task-desc">{{ currentTask.description }}</span>
+                <span v-if="currentTask.target_player_name" class="task-target">→ {{ currentTask.target_player_name }}</span>
+              </div>
+              <div class="task-timer">
+                <span class="timer-value">{{ taskCountdown }}s</span>
+              </div>
+            </div>
+          </Transition>
+
+          <!-- 惩罚通知条 -->
+          <Transition name="punishment-slide">
+            <div v-if="showPunishmentAlert" class="punishment-bar" :class="{ eliminated: lastPunishment?.is_eliminated }">
+              <div class="punishment-bar-icon">{{ lastPunishment?.is_eliminated ? '💀' : '⚠️' }}</div>
+              <div class="punishment-bar-content">
+                <span class="punishment-bar-title">{{ lastPunishment?.message || lastPunishment?.reported_player_name }}</span>
+                <span v-if="!lastPunishment?.is_eliminated" class="punishment-bar-hint">
+                  剩余 {{ 3 - (lastPunishment?.violation_count || 0) }} 次机会
+                </span>
+              </div>
+              <div v-if="lastPunishment?.reporter_name && lastPunishment?.reporter_name !== 'system'" class="punishment-bar-reporter">
+                举报人: {{ lastPunishment?.reporter_name }}
+              </div>
+            </div>
+          </Transition>
         </div>
       </div>
 
@@ -179,38 +230,6 @@
           {{ isVideoOff ? '开启视频' : '关闭视频' }}
         </button>
       </div>
-
-      <!-- 任务通知弹窗 -->
-      <Transition name="task-popup">
-        <div v-if="currentTask" class="task-popup">
-          <div class="task-header">
-            <span class="task-icon">🎯</span>
-            <span>随机任务</span>
-          </div>
-          <div class="task-content">
-            <p class="task-description">{{ currentTask.description }}</p>
-            <p v-if="currentTask.target_player_name" class="task-target">
-              任务目标：{{ currentTask.target_player_name }}
-            </p>
-          </div>
-          <div class="task-timer">
-            <span>剩余 {{ taskCountdown }} 秒</span>
-          </div>
-        </div>
-      </Transition>
-
-      <!-- 惩罚提示弹窗 -->
-      <Transition name="punishment-popup">
-        <div v-if="showPunishmentAlert" class="punishment-alert" :class="{ eliminated: lastPunishment?.is_eliminated }">
-          <div class="alert-icon">{{ lastPunishment?.is_eliminated ? '💀' : '⚠️' }}</div>
-          <div class="alert-content">
-            <p class="alert-title">{{ lastPunishment?.reported_player_name }} 说了禁忌词！</p>
-            <p class="alert-subtitle" v-if="lastPunishment?.is_eliminated">已被淘汰</p>
-            <p class="alert-subtitle" v-else>还剩 {{ 3 - (lastPunishment?.violation_count || 0) }} 次机会</p>
-          </div>
-          <p class="alert-reporter">举报人: {{ lastPunishment?.reporter_name }}</p>
-        </div>
-      </Transition>
 
       <!-- 任务历史滚动条（底部） -->
       <div v-if="taskHistory.length > 0" class="task-marquee">
@@ -256,6 +275,7 @@ import { usePlayerStore } from '../stores/player'
 import { useRoomStore } from '../stores/room'
 import { useWebSocket } from '../api/websocket'
 import { useWebRTC } from '../utils/webrtc'
+import { ActionDetector } from '../utils/actionDetector'
 
 const route = useRoute()
 const router = useRouter()
@@ -272,8 +292,9 @@ const gameStatus = ref('waiting')
 const currentRound = ref(1)
 
 // 禁忌词 {nickname: word}
-const tabooWords = ref({})
+const tabooWords = ref({})   // { nickname: { word, action } }
 const myTabooWord = ref('')
+const myTabooAction = ref('')
 
 // 惩罚状态追踪 {player_id: violation_count}
 const playerViolations = ref({})
@@ -301,6 +322,9 @@ const remoteVideoRefs = ref({})
 // 音视频控制
 const isMuted = ref(false)
 const isVideoOff = ref(false)
+
+// ---- 动作检测器 ----
+let actionDetector = null
 
 // WebRTC 实例
 const webrtc = useWebRTC()
@@ -398,6 +422,7 @@ function handleMessage(data) {
       console.log('[GameRoom] taboo_words received:', data)
       tabooWords.value = data.words || {}
       myTabooWord.value = data.my_word || ''
+      myTabooAction.value = data.my_action || ''
       console.log('[GameRoom] tabooWords updated:', tabooWords.value)
       break
 
@@ -525,6 +550,28 @@ function sendIceCandidate(data) {
   send({ type: 'ice-candidate', ...data })
 }
 
+// -------------------- 启动动作检测器 --------------------
+function startActionDetector() {
+  if (actionDetector) {
+    actionDetector.stop()
+  }
+
+  actionDetector = new ActionDetector({
+    onAction: (actionName) => {
+      console.log(`[ActionDetector] 检测到动作: ${actionName}`)
+      // 上报给后端，后端判定该动作是否触发禁忌
+      send({
+        type: 'auto_report_action',
+        action: actionName
+      })
+    }
+  })
+
+  actionDetector.start(localVideoRef.value).catch(err => {
+    console.error('[ActionDetector] 启动失败:', err)
+  })
+}
+
 // -------------------- 初始化 WebRTC --------------------
 async function initWebRTC() {
   try {
@@ -555,6 +602,9 @@ async function initWebRTC() {
     }
 
     console.log(`[GameRoom] initWebRTC 完成，共为 ${otherPlayers.value.length} 个玩家创建连接`)
+
+    // ---- 启动动作检测器 ----
+    startActionDetector()
 
   } catch (err) {
     console.error('初始化 WebRTC 失败:', err)
@@ -697,6 +747,9 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  if (actionDetector) {
+    actionDetector.stop()
+  }
   webrtc.closeAllConnections()
   disconnect()
   if (countdownTimer) clearInterval(countdownTimer)
@@ -982,48 +1035,49 @@ button.ready {
   font-size: 11px;
 }
 
-/* ========== 禁忌词标签（左上角）========== */
-.taboo-word {
+/* ========== 禁忌词+动作标签（左上角）========== */
+.taboo-item {
   position: absolute;
   top: 10px;
   left: 10px;
   background: rgba(0, 0, 0, 0.65);
   color: #ffffff;
-  padding: 5px 10px;
-  border-radius: 6px;
+  padding: 6px 10px;
+  border-radius: 8px;
   font-size: 12px;
   font-weight: 500;
-  display: flex;
-  align-items: center;
-  gap: 5px;
   z-index: 15;
   backdrop-filter: blur(4px);
   border: 1px solid rgba(255, 255, 255, 0.15);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.taboo-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
 }
 
 .taboo-icon {
-  font-size: 13px;
+  font-size: 12px;
+  flex-shrink: 0;
 }
 
-.taboo-text {
-  letter-spacing: 0.5px;
+.taboo-word-text,
+.taboo-action-text {
+  letter-spacing: 0.3px;
+  white-space: nowrap;
 }
 
 /* 本地玩家的禁忌词（显示 ???） */
-.taboo-word.self {
-  top: 10px;
-  left: 10px;
+.taboo-item.self {
   background: rgba(0, 0, 0, 0.65);
-  border: 1px solid rgba(255, 255, 255, 0.1);
 }
 
-.taboo-word.self .taboo-label {
-  font-size: 10px;
-  opacity: 0.75;
-}
-
-.taboo-word.self .taboo-mystery {
-  font-size: 14px;
+.taboo-item.self .taboo-word-text,
+.taboo-item.self .taboo-action-text {
   color: #ffeb3b;
   font-weight: bold;
   letter-spacing: 2px;
@@ -1179,7 +1233,161 @@ button.ready {
   background: #666;
 }
 
-/* 任务弹窗 */
+/* ========== 游戏布局容器 ========== */
+.game-layout {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+/* ========== 通知区域（视频下方，文档流排列） ========== */
+.notification-area {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* ========== 任务通知条 ========== */
+.task-bar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  background: linear-gradient(135deg, #1a1a2e, #16213e);
+  border: 2px solid #e94560;
+  border-radius: 12px;
+  padding: 14px 20px;
+  box-shadow: 0 4px 20px rgba(233, 69, 96, 0.3);
+}
+
+.task-bar-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.task-icon {
+  font-size: 22px;
+}
+
+.task-label {
+  color: #e94560;
+  font-size: 14px;
+  font-weight: bold;
+}
+
+.task-bar-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.task-desc {
+  color: #ffffff;
+  font-size: 16px;
+  font-weight: 500;
+}
+
+.task-target {
+  color: #e94560;
+  font-size: 13px;
+}
+
+.task-timer {
+  flex-shrink: 0;
+  text-align: center;
+}
+
+.timer-value {
+  background: rgba(233, 69, 96, 0.2);
+  color: #e94560;
+  font-size: 13px;
+  font-weight: bold;
+  padding: 4px 10px;
+  border-radius: 20px;
+}
+
+/* ========== 惩罚通知条 ========== */
+.punishment-bar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  background: linear-gradient(135deg, #1a1a2e, #16213e);
+  border: 2px solid #ff9800;
+  border-radius: 12px;
+  padding: 14px 20px;
+  box-shadow: 0 4px 20px rgba(255, 152, 0, 0.3);
+}
+
+.punishment-bar.eliminated {
+  border-color: #f44336;
+  box-shadow: 0 4px 20px rgba(244, 67, 54, 0.4);
+}
+
+.punishment-bar-icon {
+  font-size: 28px;
+  flex-shrink: 0;
+}
+
+.punishment-bar-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.punishment-bar-title {
+  color: #ffffff;
+  font-size: 16px;
+  font-weight: 500;
+}
+
+.punishment-bar-hint {
+  color: #ff9800;
+  font-size: 13px;
+}
+
+.punishment-bar.eliminated .punishment-bar-hint {
+  color: #f44336;
+}
+
+.punishment-bar-reporter {
+  color: #888;
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+/* ========== 任务条滑入/滑出动画 ========== */
+.task-slide-enter-active {
+  animation: slideDown 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.task-slide-leave-active {
+  animation: slideUp 0.25s ease-in;
+}
+
+.punishment-slide-enter-active {
+  animation: slideDown 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.punishment-slide-leave-active {
+  animation: slideUp 0.25s ease-in;
+}
+
+@keyframes slideDown {
+  from { opacity: 0; transform: translateY(-20px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slideUp {
+  from { opacity: 1; transform: translateY(0); }
+  to { opacity: 0; transform: translateY(-20px); }
+}
+
+/* ========== 任务弹窗（已废弃，改用 task-bar） ========== */
+/* 以下样式保留但不推荐使用，仅作向后兼容 */
 .task-popup {
   position: fixed;
   top: 50%;
@@ -1236,98 +1444,29 @@ button.ready {
   font-size: 14px;
 }
 
-/* 惩罚提示弹窗 */
-.punishment-alert {
-  position: fixed;
-  top: 20%;
-  left: 50%;
-  transform: translateX(-50%);
-  background: linear-gradient(145deg, #1a1a2e, #16213e);
-  border: 3px solid #ff9800;
-  border-radius: 16px;
-  padding: 24px;
-  min-width: 280px;
-  text-align: center;
-  box-shadow: 0 0 40px rgba(255, 152, 0, 0.5);
-  z-index: 1001;
-}
+/* ========== 以下为废弃的弹窗样式（保留但不再使用）========== */
+/* 已改用 task-bar 和 punishment-bar，遵循文档流排列 */
+/*
+.task-popup { ... }
+.task-header { ... }
+.task-icon { ... }
+.task-content { ... }
+.task-description { ... }
+.task-target { ... }
+.task-timer { ... }
+.punishment-alert { ... }
+.alert-icon { ... }
+.alert-content { ... }
+.alert-title { ... }
+.alert-subtitle { ... }
+.alert-reporter { ... }
+.task-popup-enter-active { ... }
+.task-popup-leave-active { ... }
+.punishment-popup-enter-active { ... }
+.punishment-popup-leave-active { ... }
+*/
 
-.punishment-alert.eliminated {
-  border-color: #f44336;
-  box-shadow: 0 0 40px rgba(244, 67, 54, 0.5);
-}
-
-.alert-icon {
-  font-size: 48px;
-  margin-bottom: 12px;
-}
-
-.alert-content {
-  margin-bottom: 12px;
-}
-
-.alert-title {
-  font-size: 20px;
-  color: white;
-  font-weight: bold;
-  margin: 0 0 8px 0;
-}
-
-.alert-subtitle {
-  font-size: 14px;
-  color: #ff9800;
-  margin: 0;
-}
-
-.punishment-alert.eliminated .alert-subtitle {
-  color: #f44336;
-}
-
-.alert-reporter {
-  font-size: 12px;
-  color: #888;
-  margin: 0;
-}
-
-/* 弹窗动画 */
-.task-popup-enter-active {
-  animation: popIn 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
-}
-
-.task-popup-leave-active {
-  animation: popOut 0.3s ease-in;
-}
-
-.punishment-popup-enter-active {
-  animation: shakeIn 0.5s cubic-bezier(0.34, 1.56, 0.64, 1);
-}
-
-.punishment-popup-leave-active {
-  animation: fadeOut 0.3s ease-in;
-}
-
-@keyframes popIn {
-  0% { opacity: 0; transform: translate(-50%, -50%) scale(0.5); }
-  100% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
-}
-
-@keyframes popOut {
-  0% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
-  100% { opacity: 0; transform: translate(-50%, -50%) scale(0.5); }
-}
-
-@keyframes shakeIn {
-  0% { opacity: 0; transform: translate(-50%, -50%) scale(0.5) rotate(-10deg); }
-  50% { transform: translate(-50%, -50%) scale(1.05) rotate(5deg); }
-  100% { opacity: 1; transform: translate(-50%, -50%) scale(1) rotate(0deg); }
-}
-
-@keyframes fadeOut {
-  0% { opacity: 1; }
-  100% { opacity: 0; }
-}
-
-/* 任务历史滚动条 */
+/* ========== 任务历史滚动条 ========== */
 .task-marquee {
   position: fixed;
   bottom: 0;

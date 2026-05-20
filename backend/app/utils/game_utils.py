@@ -14,7 +14,7 @@ def generate_player_id() -> str:
     return uuid.uuid4().hex[:8]
 
 
-# -------------------- 词库与任务库 --------------------
+# -------------------- 词库、动作库与任务库 --------------------
 
 # 禁忌词库 - 共50个词，分为5组，每组10个
 # 实际游戏时可从每组抽取1个，确保5个词风格不同
@@ -40,6 +40,15 @@ TABOO_WORDS = {
         "厨师", "兔子", "画画", "重阳", "羽毛球"
     ]
 }
+
+# 禁忌动作库 - 共5个动作
+TABOO_ACTIONS = [
+    "摸鼻子",
+    "举手",
+    "眨眼",
+    "点头",
+    "摇头"
+]
 
 # 随机任务库 - 共30个任务
 # 格式: (任务描述, 是否需要指定玩家, 是否需要道具)
@@ -93,9 +102,10 @@ class GameState(BaseModel):
     round: int = 1
     current_task: GameTask | None = None
     task_start_time: float | None = None
-    taboo_words: Dict[str, str] = {}  # player_id -> taboo_word
-    violations: Dict[str, int] = {}  # player_id -> 犯规次数
-    used_tasks: List[int] = []  # 已使用过的任务索引
+    taboo_words: Dict[str, str] = {}    # player_id -> taboo_word
+    taboo_actions: Dict[str, str] = {}  # player_id -> taboo_action
+    violations: Dict[str, int] = {}      # player_id -> 犯规次数
+    used_tasks: List[int] = []          # 已使用过的任务索引
     is_active: bool = False
 
 
@@ -133,43 +143,71 @@ class GameEngine:
 
         return taboo_distribution
 
-    def get_filtered_taboo_words(self, player_id: str) -> Dict[str, str]:
+    def distribute_taboo_actions(self) -> Dict[str, str]:
         """
-        获取指定玩家应该看到的禁忌词（不包含自己的）
-        这是核心安全逻辑：玩家只能看到其他人的禁忌词
+        为每个玩家分配禁忌动作
+        从 TABOO_ACTIONS 列表中随机抽取与玩家数量相等的动作（不重复）
+        """
+        # 动作数量通常少于玩家数，直接用 random.sample
+        selected_actions = random.sample(TABOO_ACTIONS, len(self.players))
+        action_distribution = {}
+        for i, player in enumerate(self.players):
+            action_distribution[player.id] = selected_actions[i]
+        return action_distribution
+
+    def distribute_all(self):
+        """
+        统一分配禁忌词和禁忌动作
+        同时设置 state.taboo_words 和 state.taboo_actions
+        """
+        self.state.taboo_words = self.distribute_taboo_words()
+        self.state.taboo_actions = self.distribute_taboo_actions()
+        print(f"[DISTRIBUTE] taboo_words={self.state.taboo_words}")
+        print(f"[DISTRIBUTE] taboo_actions={self.state.taboo_actions}")
+
+    def get_filtered_taboo_items(self, player_id: str) -> Dict[str, Dict[str, str]]:
+        """
+        获取指定玩家应该看到的其他玩家的（词 + 动作）
+        key 是其他玩家的 nickname，value 是 { "word": "...", "action": "..." }
+        本人的词和动作不包含在内（已由 send_personal 的 my_word / my_action 处理）
         """
         filtered = {}
         for pid, word in self.state.taboo_words.items():
             if pid != player_id:
                 player = next((p for p in self.players if p.id == pid), None)
                 if player:
-                    filtered[player.nickname] = word
+                    filtered[player.nickname] = {
+                        "word": word,
+                        "action": self.state.taboo_actions.get(pid, "未知动作")
+                    }
         return filtered
 
-    def replace_taboo_word(self, player_id: str) -> str:
+    def replace_taboo_word(self, player_id: str) -> tuple[str, str]:
         """
-        为指定玩家重新抽取一个禁忌词（不与当前房间内其他玩家重复）
-        返回新词
+        为指定玩家重新抽取禁忌词和禁忌动作（均不与他人重复）
+        返回 (new_word, new_action)
         """
-        # 收集当前所有已使用的词
+        # ---- 重新抽词 ----
         used_words = set(self.state.taboo_words.values())
-
-        # 收集所有可用词
         all_words = []
         for group in TABOO_WORDS.values():
             all_words.extend(group)
-
-        # 过滤出未使用的词
         available_words = [w for w in all_words if w not in used_words]
-
-        # 如果可用词不够（几乎不可能发生），就从所有词里抽
         if not available_words:
             available_words = all_words
-
         new_word = random.choice(available_words)
         self.state.taboo_words[player_id] = new_word
-        print(f"[REPLACE_WORD] player={player_id} new_word={new_word}")
-        return new_word
+
+        # ---- 重新抽动作 ----
+        used_actions = set(self.state.taboo_actions.values())
+        available_actions = [a for a in TABOO_ACTIONS if a not in used_actions]
+        if not available_actions:
+            available_actions = TABOO_ACTIONS
+        new_action = random.choice(available_actions)
+        self.state.taboo_actions[player_id] = new_action
+
+        print(f"[REPLACE] player={player_id} new_word={new_word} new_action={new_action}")
+        return new_word, new_action
 
     def generate_task(self) -> GameTask:
         """生成一个新的随机任务"""
